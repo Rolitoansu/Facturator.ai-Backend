@@ -58,6 +58,7 @@ func handleUploadReceipt(w http.ResponseWriter, r *http.Request) {
 	userID := GetUserID(r)
 
 	// Check subscription limit
+	/*
 	sub, _ := GetSubscription(userID)
 	if sub != nil && sub.ReceiptLimit > 0 {
 		count, err := GetMonthlyReceiptCount(userID)
@@ -69,6 +70,7 @@ func handleUploadReceipt(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	*/
 
 	err := r.ParseMultipartForm(10 << 20) // 10 MB
 	if err != nil {
@@ -160,6 +162,13 @@ func handleUploadReceipt(w http.ResponseWriter, r *http.Request) {
 		}
 
 		txnID := NewUUID()
+		_, err = time.Parse("2006-01-02", ocrResult.Date)
+		safeDate := ocrResult.Date
+		if err != nil {
+			safeDate = time.Now().Format("2006-01-02")
+			fmt.Printf("Warning: Invalid date from ML (%s), defaulting to today: %s\n", ocrResult.Date, safeDate)
+		}
+
 		transaction := Transaction{
 			ID:        txnID,
 			ReceiptID: &rcpt.ID,
@@ -167,7 +176,7 @@ func handleUploadReceipt(w http.ResponseWriter, r *http.Request) {
 			Amount:    ocrResult.Amount,
 			Merchant:  ocrResult.Merchant,
 			Category:  ocrResult.Category,
-			Date:      ocrResult.Date,
+			Date:      safeDate,
 		}
 
 		if err := CreateTransaction(transaction); err != nil {

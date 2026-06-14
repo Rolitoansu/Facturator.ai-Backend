@@ -63,7 +63,7 @@ func callFacturatorMLService(imageURL string) (OCRResult, error) {
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := &http.Client{Timeout: 120 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return OCRResult{}, fmt.Errorf("error calling Facturator ML service: %w", err)
