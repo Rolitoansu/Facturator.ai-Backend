@@ -89,6 +89,8 @@ func main() {
 			handleDeleteTransactions(w, r)
 		case path == "/api/transactions/reassign" && method == "PUT":
 			handleReassignTransactions(w, r)
+		case strings.HasPrefix(path, "/api/transactions/") && method == "PUT":
+			handleUpdateTransaction(w, r)
 
 		// Budgets
 		case path == "/api/budgets" && method == "GET":

@@ -176,6 +176,12 @@ func CreateReceipt(r Receipt) error {
 	return err
 }
 
+func GetReceiptRawText(receiptID string) (string, error) {
+	var rawText string
+	err := DB.QueryRow(`SELECT raw_text FROM receipts WHERE id = $1`, receiptID).Scan(&rawText)
+	return rawText, err
+}
+
 func UpdateReceiptStatus(id string, status string, rawText string) error {
 	_, err := DB.Exec(`UPDATE receipts SET status = $1, raw_text = $2 WHERE id = $3`, status, rawText, id)
 	return err
@@ -226,6 +232,28 @@ func DeleteTransactionsByCategory(userID string, category string) error {
 func ReassignTransactionsCategory(userID string, oldCategory, newCategory string) error {
 	_, err := DB.Exec(`UPDATE transactions SET category = $1 WHERE user_id = $2 AND category = $3`, newCategory, userID, oldCategory)
 	return err
+}
+
+func UpdateTransaction(t Transaction) error {
+	_, err := DB.Exec(`
+		UPDATE transactions 
+		SET category = $1, merchant = $2, amount = $3, date = $4, description = $5, updated_at = NOW()
+		WHERE id = $6 AND user_id = $7
+	`, t.Category, t.Merchant, t.Amount, t.Date, t.Description, t.ID, t.UserID)
+	return err
+}
+
+func GetTransactionByID(id string, userID string) (Transaction, error) {
+	var t Transaction
+	var desc string
+	err := DB.QueryRow(`
+		SELECT id, receipt_id, user_id, amount, merchant, category, description, date 
+		FROM transactions WHERE id = $1 AND user_id = $2
+	`, id, userID).Scan(&t.ID, &t.ReceiptID, &t.UserID, &t.Amount, &t.Merchant, &t.Category, &desc, &t.Date)
+	if desc != "" {
+		t.Description = &desc
+	}
+	return t, err
 }
 
 // ─── Budgets ─────────────────────────────────────────────

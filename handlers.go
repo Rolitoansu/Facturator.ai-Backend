@@ -150,7 +150,12 @@ func handleUploadReceipt(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		if err := UpdateReceiptStatus(rcpt.ID, "done", rawText); err != nil {
+		status := "done"
+		if ocrResult.NeedsReview {
+			status = "needs_review"
+		}
+
+		if err := UpdateReceiptStatus(rcpt.ID, status, rawText); err != nil {
 			fmt.Printf("Database error updating receipt status: %v\n", err)
 			return
 		}
@@ -177,15 +182,17 @@ func handleUploadReceipt(w http.ResponseWriter, r *http.Request) {
 			Type: "RECEIPT_PROCESSED",
 			Payload: ReceiptProcessedPayload{
 				ReceiptID: rcpt.ID,
-				Status:    "done",
+				Status:    status,
 				Updates: map[string]interface{}{
-					"id":        transaction.ID,
-					"receiptId": transaction.ReceiptID,
-					"userId":    transaction.UserID,
-					"amount":    transaction.Amount,
-					"merchant":  transaction.Merchant,
-					"category":  transaction.Category,
-					"date":      transaction.Date,
+					"id":           transaction.ID,
+					"receiptId":    transaction.ReceiptID,
+					"userId":       transaction.UserID,
+					"amount":       transaction.Amount,
+					"merchant":     transaction.Merchant,
+					"category":     transaction.Category,
+					"date":         transaction.Date,
+					"confidence":   ocrResult.Confidence,
+					"needs_review": ocrResult.NeedsReview,
 				},
 			},
 		})
@@ -236,6 +243,49 @@ func handleReassignTransactions(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]bool{"success": true})
+}
+
+func handleUpdateTransaction(w http.ResponseWriter, r *http.Request) {
+	userID := GetUserID(r)
+	pathParts := strings.Split(r.URL.Path, "/")
+	if len(pathParts) < 4 {
+		writeError(w, http.StatusBadRequest, "Invalid path")
+		return
+	}
+	txnID := pathParts[3]
+
+	var req Transaction
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	req.ID = txnID
+	req.UserID = userID
+
+	existingTxn, err := GetTransactionByID(txnID, userID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "Transaction not found")
+		return
+	}
+
+	if err := UpdateTransaction(req); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	// Si el usuario corrigió la categoría y viene de un ticket, mandamos feedback a la IA
+	if req.Category != "" && req.Category != existingTxn.Category {
+		if existingTxn.ReceiptID != nil {
+			rawText, err := GetReceiptRawText(*existingTxn.ReceiptID)
+			if err == nil && rawText != "" {
+				SendFeedbackToML(rawText, req.Category)
+				// Marcamos el ticket como 'done' para limpiar el posible estado 'needs_review'
+				UpdateReceiptStatus(*existingTxn.ReceiptID, "done", rawText)
+			}
+		}
 	}
 
 	writeJSON(w, http.StatusOK, map[string]bool{"success": true})

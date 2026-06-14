@@ -14,10 +14,13 @@ import (
 )
 
 type OCRResult struct {
-	Merchant string  `json:"merchant"`
-	Amount   float64 `json:"amount"`
-	Category string  `json:"category"`
-	Date     string  `json:"date"`
+	Merchant    string  `json:"merchant"`
+	Amount      float64 `json:"amount"`
+	Category    string  `json:"category"`
+	Date        string  `json:"date"`
+	RawText     string  `json:"raw_text"`
+	Confidence  float64 `json:"confidence"`
+	NeedsReview bool    `json:"needs_review"`
 }
 
 func ProcessReceiptImage(imageURL string) (OCRResult, string, error) {
@@ -27,13 +30,16 @@ func ProcessReceiptImage(imageURL string) (OCRResult, string, error) {
 	if err != nil {
 		fmt.Printf("Facturator ML service failed: %v. Using fallback mock...\n", err)
 		result = processMockOCR(imageURL)
-		rawText := fmt.Sprintf("FALLBACK MOCK (ML SERVICE OFFLINE):\nComercio: %s\nTotal: %.2f EUR\nFecha: %s\nCategoría: %s",
-			result.Merchant, result.Amount, result.Date, result.Category)
+		rawText := fmt.Sprintf("FALLBACK MOCK (ML SERVICE OFFLINE):\nComercio: %s\nTotal: %.2f EUR\nFecha: %s\nCategoría: %s\n\n[RAW TEXT]:\n%s",
+			result.Merchant, result.Amount, result.Date, result.Category, result.RawText)
 		return result, rawText, nil
 	}
 
-	rawText := fmt.Sprintf("FACTURATOR ML RESULTS:\nComercio: %s\nTotal: %.2f EUR\nFecha: %s\nCategoría: %s",
-		result.Merchant, result.Amount, result.Date, result.Category)
+	rawText := result.RawText
+	if rawText == "" {
+		rawText = fmt.Sprintf("FACTURATOR ML RESULTS:\nComercio: %s\nTotal: %.2f EUR\nFecha: %s\nCategoría: %s",
+			result.Merchant, result.Amount, result.Date, result.Category)
+	}
 
 	return result, rawText, nil
 }
@@ -96,9 +102,47 @@ func processMockOCR(imageURL string) OCRResult {
 	}
 
 	return OCRResult{
-		Merchant: merchant,
-		Amount:   amount,
-		Category: category,
-		Date:     date,
+		Merchant:    merchant,
+		Amount:      amount,
+		Category:    category,
+		Date:        date,
+		RawText:     "TICKET MOCK DE PRUEBA\n" + merchant + "\n" + date + "\nTOTAL: " + fmt.Sprintf("%.2f", amount),
+		Confidence:  0.85,
+		NeedsReview: false,
 	}
+}
+
+// SendFeedbackToML sends corrected category and raw OCR text to the ML Python backend asynchronously
+func SendFeedbackToML(rawText string, correctCategory string) {
+	// Execute in background
+	go func() {
+		mlURL := os.Getenv("ML_SERVICE_URL")
+		if mlURL == "" {
+			mlURL = "http://localhost:8000" // Default for local
+		}
+
+		payload := map[string]string{
+			"raw_text":         rawText,
+			"correct_category": correctCategory,
+		}
+
+		jsonPayload, err := json.Marshal(payload)
+		if err != nil {
+			fmt.Printf("[ML Feedback] Error marshalling payload: %v\n", err)
+			return
+		}
+
+		resp, err := http.Post(mlURL+"/feedback", "application/json", bytes.NewBuffer(jsonPayload))
+		if err != nil {
+			fmt.Printf("[ML Feedback] Error sending feedback to ML service: %v\n", err)
+			return
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			fmt.Printf("[ML Feedback] Successfully sent feedback for category '%s'\n", correctCategory)
+		} else {
+			fmt.Printf("[ML Feedback] ML service returned status: %d\n", resp.StatusCode)
+		}
+	}()
 }
