@@ -1,14 +1,10 @@
 package main
 
 import (
-	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
-	"math/big"
 	"net/http"
-	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -29,12 +25,11 @@ type CategoryCreateRequest struct {
 	Color string `json:"color"`
 }
 
-var GeminiAPIKey string
-
-func generateID(prefix string) string {
-	b := make([]byte, 4)
-	_, _ = rand.Read(b)
-	return fmt.Sprintf("%s_%x", prefix, b)
+type ProfileUpdateRequest struct {
+	DisplayName       *string  `json:"displayName"`
+	Currency          *string  `json:"currency"`
+	Locale            *string  `json:"locale"`
+	MonthlyBudgetGoal *float64 `json:"monthlyBudgetGoal"`
 }
 
 func writeJSON(w http.ResponseWriter, status int, data interface{}) {
@@ -46,6 +41,8 @@ func writeJSON(w http.ResponseWriter, status int, data interface{}) {
 func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
 }
+
+// ─── Receipts ────────────────────────────────────────────
 
 func handleGetReceipts(w http.ResponseWriter, r *http.Request) {
 	userID := GetUserID(r)
@@ -60,7 +57,20 @@ func handleGetReceipts(w http.ResponseWriter, r *http.Request) {
 func handleUploadReceipt(w http.ResponseWriter, r *http.Request) {
 	userID := GetUserID(r)
 
-	err := r.ParseMultipartForm(10 << 20)
+	// Check subscription limit
+	sub, _ := GetSubscription(userID)
+	if sub != nil && sub.ReceiptLimit > 0 {
+		count, err := GetMonthlyReceiptCount(userID)
+		if err == nil && count >= sub.ReceiptLimit {
+			writeError(w, http.StatusForbidden, fmt.Sprintf(
+				"Monthly receipt limit reached (%d/%d). Upgrade to Pro for more.",
+				count, sub.ReceiptLimit,
+			))
+			return
+		}
+	}
+
+	err := r.ParseMultipartForm(10 << 20) // 10 MB
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "Failed to parse multipart form")
 		return
@@ -73,39 +83,43 @@ func handleUploadReceipt(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	uploadDir := "./uploads/receipts"
-	if err := os.MkdirAll(uploadDir, os.ModePerm); err != nil {
-		writeError(w, http.StatusInternalServerError, "Failed to create uploads directory")
+	receiptID := NewUUID()
+	ext := ".jpg"
+	if dotIdx := strings.LastIndex(header.Filename, "."); dotIdx >= 0 {
+		ext = header.Filename[dotIdx:]
+	}
+	fileName := fmt.Sprintf("%s%s", receiptID, ext)
+	contentType := DetectContentType(header.Filename)
+	fileSize := int(header.Size)
+
+	var imageURL string
+	var storagePath *string
+
+	if Storage != nil {
+		// Upload to Supabase Storage
+		result, err := Storage.Upload(userID, fileName, contentType, file)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to upload file: %v", err))
+			return
+		}
+		imageURL = result.PublicURL
+		storagePath = &result.Path
+	} else {
+		writeError(w, http.StatusServiceUnavailable, "File storage is not configured")
 		return
 	}
-
-	ext := filepath.Ext(header.Filename)
-	uniqueName := fmt.Sprintf("%d%s", time.Now().UnixNano(), ext)
-	filePath := filepath.Join(uploadDir, uniqueName)
-
-	out, err := os.Create(filePath)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "Failed to save file on server")
-		return
-	}
-	defer out.Close()
-
-	_, err = io.Copy(out, file)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "Failed to write file content")
-		return
-	}
-
-	receiptID := generateID("rcpt")
-	imageURL := fmt.Sprintf("/uploads/receipts/%s", uniqueName)
 
 	receipt := Receipt{
-		ID:        receiptID,
-		UserID:    userID,
-		ImageURL:  imageURL,
-		RawText:   "",
-		Status:    "processing",
-		CreatedAt: time.Now(),
+		ID:          receiptID,
+		UserID:      userID,
+		ImageURL:    imageURL,
+		StoragePath: storagePath,
+		RawText:     "",
+		Status:      "processing",
+		FileSize:    &fileSize,
+		MimeType:    &contentType,
+		CreatedAt:   time.Now(),
+		UpdatedAt:   time.Now(),
 	}
 
 	if err := CreateReceipt(receipt); err != nil {
@@ -115,10 +129,13 @@ func handleUploadReceipt(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusAccepted, receipt)
 
-	go func(rcpt Receipt, fileP string) {
+	// Process asynchronously
+	go func(rcpt Receipt) {
 		time.Sleep(1 * time.Second)
 
-		ocrResult, rawText, err := ProcessReceiptImage(fileP, GeminiAPIKey)
+		// For OCR, we need the file content. Since it's in Supabase Storage,
+		// we download it or use the URL directly.
+		ocrResult, rawText, err := ProcessReceiptImage(rcpt.ImageURL)
 		if err != nil {
 			fmt.Printf("Error processing receipt %s: %v\n", rcpt.ID, err)
 			_ = UpdateReceiptStatus(rcpt.ID, "error", err.Error())
@@ -138,7 +155,7 @@ func handleUploadReceipt(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		txnID := generateID("txn")
+		txnID := NewUUID()
 		transaction := Transaction{
 			ID:        txnID,
 			ReceiptID: &rcpt.ID,
@@ -172,8 +189,10 @@ func handleUploadReceipt(w http.ResponseWriter, r *http.Request) {
 				},
 			},
 		})
-	}(receipt, filePath)
+	}(receipt)
 }
+
+// ─── Transactions ────────────────────────────────────────
 
 func handleGetTransactions(w http.ResponseWriter, r *http.Request) {
 	userID := GetUserID(r)
@@ -222,6 +241,8 @@ func handleReassignTransactions(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{"success": true})
 }
 
+// ─── Budgets ─────────────────────────────────────────────
+
 func handleGetBudgets(w http.ResponseWriter, r *http.Request) {
 	userID := GetUserID(r)
 	budgets, err := GetBudgets(userID)
@@ -251,7 +272,7 @@ func handleCreateBudget(w http.ResponseWriter, r *http.Request) {
 	}
 
 	budget := Budget{
-		ID:          generateID("bdg"),
+		ID:          NewUUID(),
 		UserID:      userID,
 		Category:    req.Category,
 		LimitAmount: req.LimitAmount,
@@ -309,6 +330,8 @@ func handleDeleteBudget(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{"success": true})
 }
 
+// ─── Categories ──────────────────────────────────────────
+
 func handleGetCategories(w http.ResponseWriter, r *http.Request) {
 	userID := GetUserID(r)
 	categories, err := GetCategories(userID)
@@ -333,11 +356,12 @@ func handleCreateCategory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	normalizedID := normalizeLabel(req.Label)
+	slug := normalizeLabel(req.Label)
 
 	category := Category{
-		ID:     normalizedID,
+		ID:     NewUUID(),
 		UserID: &userID,
+		Slug:   slug,
 		Label:  req.Label,
 		Color:  req.Color,
 	}
@@ -349,6 +373,47 @@ func handleCreateCategory(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusCreated, category)
 }
+
+// ─── Profile ─────────────────────────────────────────────
+
+func handleGetProfile(w http.ResponseWriter, r *http.Request) {
+	userID := GetUserID(r)
+	profile, err := GetUserProfile(userID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if profile == nil {
+		writeError(w, http.StatusNotFound, "Profile not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, profile)
+}
+
+func handleUpdateProfile(w http.ResponseWriter, r *http.Request) {
+	userID := GetUserID(r)
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, 4096))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "Error reading request body")
+		return
+	}
+
+	var req ProfileUpdateRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	if err := UpdateUserProfile(userID, req.DisplayName, req.Currency, req.Locale, req.MonthlyBudgetGoal); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]bool{"success": true})
+}
+
+// ─── Helpers ─────────────────────────────────────────────
 
 func normalizeLabel(label string) string {
 	val := strings.ToLower(label)
@@ -367,8 +432,7 @@ func normalizeLabel(label string) string {
 	val = strings.Trim(val, "_")
 
 	if val == "" {
-		nBig, _ := rand.Int(rand.Reader, big.NewInt(10000))
-		val = fmt.Sprintf("cat_%d", nBig.Int64())
+		val = "custom_" + NewUUID()[:8]
 	}
 
 	return val

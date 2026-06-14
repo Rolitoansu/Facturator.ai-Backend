@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 
 	"github.com/gorilla/websocket"
@@ -13,7 +14,15 @@ var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
 	CheckOrigin: func(r *http.Request) bool {
-		return true
+		origin := r.Header.Get("Origin")
+		// Allow localhost origins for development, restrict in production
+		if strings.HasPrefix(origin, "http://localhost:") ||
+			strings.HasPrefix(origin, "http://127.0.0.1:") {
+			return true
+		}
+		// Allow the configured frontend origin
+		frontendOrigin := requireEnv("FRONTEND_ORIGIN", "http://localhost:5173")
+		return origin == frontendOrigin
 	},
 }
 
@@ -23,7 +32,7 @@ type Client struct {
 }
 
 type SocketEvent struct {
-	Type    string                 `json:"type"`
+	Type    string                  `json:"type"`
 	Payload ReceiptProcessedPayload `json:"payload"`
 }
 

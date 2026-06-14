@@ -21,13 +21,21 @@ func GetUserID(r *http.Request) string {
 	return val.(string)
 }
 
-func CORSMiddleware(next http.Handler) http.Handler {
+// CORSMiddleware handles CORS with explicit allowed origins.
+func CORSMiddleware(next http.Handler, allowedOrigins []string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
-		if origin == "" || strings.HasPrefix(origin, "http://localhost:") || strings.HasPrefix(origin, "http://127.0.0.1:") {
+
+		allowed := false
+		for _, o := range allowedOrigins {
+			if origin == o {
+				allowed = true
+				break
+			}
+		}
+
+		if allowed {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
-		} else {
-			w.Header().Set("Access-Control-Allow-Origin", "http://localhost:5173")
 		}
 
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
@@ -43,14 +51,10 @@ func CORSMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-func AuthMiddleware(supabaseURL string, supabaseAnonKey string, devMode bool) func(http.Handler) http.Handler {
+// AuthMiddleware validates Supabase JWT tokens. No dev-mode bypass.
+func AuthMiddleware(supabaseURL string, supabaseAnonKey string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path == "/ws" {
-				next.ServeHTTP(w, r)
-				return
-			}
-
 			authHeader := r.Header.Get("Authorization")
 			var token string
 
@@ -59,23 +63,13 @@ func AuthMiddleware(supabaseURL string, supabaseAnonKey string, devMode bool) fu
 			}
 
 			if token == "" {
-				if devMode {
-					ctx := context.WithValue(r.Context(), UserIDKey, "user_9f2b7d6a")
-					next.ServeHTTP(w, r.WithContext(ctx))
-					return
-				}
-				http.Error(w, "Unauthorized: Authorization token is required", http.StatusUnauthorized)
+				http.Error(w, `{"error":"Unauthorized: Authorization token is required"}`, http.StatusUnauthorized)
 				return
 			}
 
 			userID, err := verifySupabaseToken(supabaseURL, supabaseAnonKey, token)
 			if err != nil {
-				if devMode {
-					ctx := context.WithValue(r.Context(), UserIDKey, "user_9f2b7d6a")
-					next.ServeHTTP(w, r.WithContext(ctx))
-					return
-				}
-				http.Error(w, fmt.Sprintf("Unauthorized: invalid token: %v", err), http.StatusUnauthorized)
+				http.Error(w, fmt.Sprintf(`{"error":"Unauthorized: %v"}`, err), http.StatusUnauthorized)
 				return
 			}
 

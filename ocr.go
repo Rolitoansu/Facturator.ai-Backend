@@ -6,10 +6,8 @@ import (
 	"fmt"
 	"io"
 	"math/rand"
-	"mime/multipart"
 	"net/http"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -22,114 +20,78 @@ type OCRResult struct {
 	Date     string  `json:"date"`
 }
 
-func ProcessReceiptImage(imagePath string, apiKey string) (OCRResult, string, error) {
-	fmt.Printf("Processing receipt: %s\n", imagePath)
+func ProcessReceiptImage(imageURL string) (OCRResult, string, error) {
+	fmt.Printf("Processing receipt: %s\n", imageURL)
 
-	result, err := callPythonMLService(imagePath)
+	result, err := callFacturatorMLService(imageURL)
 	if err != nil {
-		fmt.Printf("Python ML service failed: %v. Using fallback mock...\n", err)
-		result = processMockOCR(imagePath)
+		fmt.Printf("Facturator ML service failed: %v. Using fallback mock...\n", err)
+		result = processMockOCR(imageURL)
 		rawText := fmt.Sprintf("FALLBACK MOCK (ML SERVICE OFFLINE):\nComercio: %s\nTotal: %.2f EUR\nFecha: %s\nCategoría: %s",
 			result.Merchant, result.Amount, result.Date, result.Category)
 		return result, rawText, nil
 	}
 
-	rawText := fmt.Sprintf("ML SERVICE RESULTS:\nComercio: %s\nTotal: %.2f EUR\nFecha: %s\nCategoría: %s",
+	rawText := fmt.Sprintf("FACTURATOR ML RESULTS:\nComercio: %s\nTotal: %.2f EUR\nFecha: %s\nCategoría: %s",
 		result.Merchant, result.Amount, result.Date, result.Category)
 
 	return result, rawText, nil
 }
 
-func callPythonMLService(imagePath string) (OCRResult, error) {
-	file, err := os.Open(imagePath)
-	if err != nil {
-		return OCRResult{}, fmt.Errorf("error opening file: %w", err)
-	}
-	defer file.Close()
-
-	body := &bytes.Buffer{}
-	writer := multipart.NewWriter(body)
-	part, err := writer.CreateFormFile("file", filepath.Base(imagePath))
-	if err != nil {
-		return OCRResult{}, fmt.Errorf("error creating form file: %w", err)
-	}
-	_, err = io.Copy(part, file)
-	if err != nil {
-		return OCRResult{}, fmt.Errorf("error copying file content: %w", err)
-	}
-	err = writer.Close()
-	if err != nil {
-		return OCRResult{}, fmt.Errorf("error closing writer: %w", err)
-	}
-
-	mlURL := os.Getenv("ML_SERVER_URL")
+func callFacturatorMLService(imageURL string) (OCRResult, error) {
+	mlURL := os.Getenv("FACTURATOR_ML_URL")
 	if mlURL == "" {
-		mlURL = "http://localhost:5000/predict"
+		mlURL = "http://localhost:8000/predict" // Asumimos que correrá en el puerto 8000
 	}
 
-	req, err := http.NewRequest("POST", mlURL, body)
+	// Enviamos la URL de la imagen en formato JSON
+	requestBody, err := json.Marshal(map[string]string{
+		"image_url": imageURL,
+	})
+	if err != nil {
+		return OCRResult{}, fmt.Errorf("error marshalling json: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", mlURL, bytes.NewBuffer(requestBody))
 	if err != nil {
 		return OCRResult{}, fmt.Errorf("error creating request: %w", err)
 	}
-	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("Content-Type", "application/json")
 
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return OCRResult{}, fmt.Errorf("error calling Python ML service: %w", err)
+		return OCRResult{}, fmt.Errorf("error calling Facturator ML service: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
-		return OCRResult{}, fmt.Errorf("Python ML service returned status %d: %s", resp.StatusCode, string(respBody))
+		return OCRResult{}, fmt.Errorf("Facturator ML returned status %d: %s", resp.StatusCode, string(respBody))
 	}
 
 	var result OCRResult
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return OCRResult{}, fmt.Errorf("error decoding Python ML service response: %w", err)
+		return OCRResult{}, fmt.Errorf("error decoding Facturator ML response: %w", err)
 	}
 
 	return result, nil
 }
 
-func processMockOCR(imagePath string) OCRResult {
-	filename := strings.ToLower(filepath.Base(imagePath))
+func processMockOCR(imageURL string) OCRResult {
+	// Mock fallback por si el servicio de ML no está levantado
+	merchants := []string{"Lidl", "Carrefour", "Uber", "Zara", "Decathlon", "Burguer King", "Starbucks", "Gasolinera Repsol"}
+	merchant := merchants[rand.Intn(len(merchants))]
 
-	var merchant string
-	var amount float64
-	var category string
+	amounts := []float64{12.50, 18.90, 32.40, 54.20, 8.45, 120.00, 25.60, 45.00}
+	amount := amounts[rand.Intn(len(amounts))]
 
-	if strings.Contains(filename, "mercadona") {
-		merchant = "Mercadona"
-		amount = 67.40
-		category = "alimentacion"
-	} else if strings.Contains(filename, "renfe") || strings.Contains(filename, "ave") {
-		merchant = "Renfe AVE"
-		amount = 43.50
-		category = "transporte"
-	} else if strings.Contains(filename, "el-corte-ingles") || strings.Contains(filename, "corte") {
-		merchant = "El Corte Ingles"
-		amount = 129.00
-		category = "ropa"
-	} else if strings.Contains(filename, "spotify") {
-		merchant = "Spotify"
-		amount = 22.90
-		category = "suscripciones"
-	} else {
-		merchants := []string{"Lidl", "Carrefour", "Uber", "Zara", "Decathlon", "Burguer King", "Starbucks", "Gasolinera Repsol"}
-		merchant = merchants[rand.Intn(len(merchants))]
-
-		amounts := []float64{12.50, 18.90, 32.40, 54.20, 8.45, 120.00, 25.60, 45.00}
-		amount = amounts[rand.Intn(len(amounts))]
-
-		categories := []string{"alimentacion", "transporte", "ropa", "ocio", "suscripciones", "hogar"}
-		category = categories[rand.Intn(len(categories))]
-	}
+	categories := []string{"alimentacion", "transporte", "ropa", "ocio", "suscripciones", "hogar"}
+	category := categories[rand.Intn(len(categories))]
 
 	date := time.Now().Format("2006-01-02")
 	dateRegex := regexp.MustCompile(`\d{4}-\d{2}-\d{2}`)
-	if match := dateRegex.FindString(filename); match != "" {
+	if match := dateRegex.FindString(imageURL); match != "" {
 		date = match
 	}
 
