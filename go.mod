@@ -8,3 +8,5 @@ require (
 	github.com/lib/pq v1.12.3
 	github.com/stripe/stripe-go/v85 v85.0.0
 )
+
+require github.com/joho/godotenv v1.5.1 // indirect

@@ -209,30 +209,37 @@ func handleCheckoutCompleted(event stripe.Event) {
 }
 
 func handleSubscriptionUpdated(event stripe.Event) {
-	var sub stripe.Subscription
-	if err := json.Unmarshal(event.Data.Raw, &sub); err != nil {
+	var subData struct {
+		ID                 string `json:"id"`
+		Customer           string `json:"customer"`
+		Status             string `json:"status"`
+		CancelAtPeriodEnd  bool   `json:"cancel_at_period_end"`
+		CurrentPeriodStart int64  `json:"current_period_start"`
+		CurrentPeriodEnd   int64  `json:"current_period_end"`
+	}
+	if err := json.Unmarshal(event.Data.Raw, &subData); err != nil {
 		fmt.Printf("Error parsing subscription update: %v\n", err)
 		return
 	}
 
 	// Find user by Stripe customer ID
-	userID := findUserByStripeCustomer(sub.Customer.ID)
+	userID := findUserByStripeCustomer(subData.Customer)
 	if userID == "" {
-		fmt.Printf("No user found for Stripe customer %s\n", sub.Customer.ID)
+		fmt.Printf("No user found for Stripe customer %s\n", subData.Customer)
 		return
 	}
 
-	status := string(sub.Status)
-	cancelAtEnd := sub.CancelAtPeriodEnd
-	periodStart := time.Unix(sub.CurrentPeriodStart, 0)
-	periodEnd := time.Unix(sub.CurrentPeriodEnd, 0)
+	status := subData.Status
+	cancelAtEnd := subData.CancelAtPeriodEnd
+	periodStart := time.Unix(subData.CurrentPeriodStart, 0)
+	periodEnd := time.Unix(subData.CurrentPeriodEnd, 0)
 
 	plan := "pro"
 	if status == "canceled" || status == "unpaid" {
 		plan = "free"
 	}
 
-	subID := sub.ID
+	subID := subData.ID
 	err := UpdateSubscription(
 		userID,
 		plan,
@@ -250,13 +257,15 @@ func handleSubscriptionUpdated(event stripe.Event) {
 }
 
 func handleSubscriptionDeleted(event stripe.Event) {
-	var sub stripe.Subscription
-	if err := json.Unmarshal(event.Data.Raw, &sub); err != nil {
+	var subData struct {
+		Customer string `json:"customer"`
+	}
+	if err := json.Unmarshal(event.Data.Raw, &subData); err != nil {
 		fmt.Printf("Error parsing subscription deletion: %v\n", err)
 		return
 	}
 
-	userID := findUserByStripeCustomer(sub.Customer.ID)
+	userID := findUserByStripeCustomer(subData.Customer)
 	if userID == "" {
 		return
 	}
@@ -277,17 +286,19 @@ func handleSubscriptionDeleted(event stripe.Event) {
 }
 
 func handlePaymentFailed(event stripe.Event) {
-	var invoice stripe.Invoice
-	if err := json.Unmarshal(event.Data.Raw, &invoice); err != nil {
+	var invoiceData struct {
+		Customer string `json:"customer"`
+	}
+	if err := json.Unmarshal(event.Data.Raw, &invoiceData); err != nil {
 		fmt.Printf("Error parsing invoice: %v\n", err)
 		return
 	}
 
-	if invoice.Customer == nil {
+	if invoiceData.Customer == "" {
 		return
 	}
 
-	userID := findUserByStripeCustomer(invoice.Customer.ID)
+	userID := findUserByStripeCustomer(invoiceData.Customer)
 	if userID == "" {
 		return
 	}

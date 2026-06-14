@@ -191,7 +191,7 @@ func UpdateReceiptStatus(id string, status string, rawText string) error {
 
 func GetTransactions(userID string) ([]Transaction, error) {
 	rows, err := DB.Query(`
-		SELECT id, receipt_id, user_id, amount, merchant, category, COALESCE(description, ''), date
+		SELECT id, receipt_id, user_id, amount, merchant, category, date
 		FROM transactions
 		WHERE user_id = $1
 		ORDER BY date DESC, created_at DESC
@@ -204,12 +204,8 @@ func GetTransactions(userID string) ([]Transaction, error) {
 	var txns []Transaction
 	for rows.Next() {
 		var t Transaction
-		var desc string
-		if err := rows.Scan(&t.ID, &t.ReceiptID, &t.UserID, &t.Amount, &t.Merchant, &t.Category, &desc, &t.Date); err != nil {
+		if err := rows.Scan(&t.ID, &t.ReceiptID, &t.UserID, &t.Amount, &t.Merchant, &t.Category, &t.Date); err != nil {
 			return nil, err
-		}
-		if desc != "" {
-			t.Description = &desc
 		}
 		txns = append(txns, t)
 	}
@@ -218,9 +214,9 @@ func GetTransactions(userID string) ([]Transaction, error) {
 
 func CreateTransaction(t Transaction) error {
 	_, err := DB.Exec(`
-		INSERT INTO transactions (id, receipt_id, user_id, amount, merchant, category, description, date)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-	`, t.ID, t.ReceiptID, t.UserID, t.Amount, t.Merchant, t.Category, t.Description, t.Date)
+		INSERT INTO transactions (id, receipt_id, user_id, amount, merchant, category, date)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+	`, t.ID, t.ReceiptID, t.UserID, t.Amount, t.Merchant, t.Category, t.Date)
 	return err
 }
 
@@ -237,22 +233,18 @@ func ReassignTransactionsCategory(userID string, oldCategory, newCategory string
 func UpdateTransaction(t Transaction) error {
 	_, err := DB.Exec(`
 		UPDATE transactions 
-		SET category = $1, merchant = $2, amount = $3, date = $4, description = $5, updated_at = NOW()
-		WHERE id = $6 AND user_id = $7
-	`, t.Category, t.Merchant, t.Amount, t.Date, t.Description, t.ID, t.UserID)
+		SET category = $1, merchant = $2, amount = $3, date = $4, updated_at = NOW()
+		WHERE id = $5 AND user_id = $6
+	`, t.Category, t.Merchant, t.Amount, t.Date, t.ID, t.UserID)
 	return err
 }
 
 func GetTransactionByID(id string, userID string) (Transaction, error) {
 	var t Transaction
-	var desc string
 	err := DB.QueryRow(`
-		SELECT id, receipt_id, user_id, amount, merchant, category, description, date 
+		SELECT id, receipt_id, user_id, amount, merchant, category, date 
 		FROM transactions WHERE id = $1 AND user_id = $2
-	`, id, userID).Scan(&t.ID, &t.ReceiptID, &t.UserID, &t.Amount, &t.Merchant, &t.Category, &desc, &t.Date)
-	if desc != "" {
-		t.Description = &desc
-	}
+	`, id, userID).Scan(&t.ID, &t.ReceiptID, &t.UserID, &t.Amount, &t.Merchant, &t.Category, &t.Date)
 	return t, err
 }
 

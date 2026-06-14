@@ -5,11 +5,15 @@ import (
 	"net/http"
 	"os"
 	"strings"
+
+	"github.com/joho/godotenv"
 )
 
 var Storage *SupabaseStorage
 
 func main() {
+	godotenv.Load() // Loads .env file if it exists
+
 	port := requireEnv("PORT", "8080")
 	dbURL := requireEnv("DATABASE_URL", "")
 	supabaseURL := requireEnv("SUPABASE_URL", "")

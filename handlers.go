@@ -123,6 +123,7 @@ func handleUploadReceipt(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := CreateReceipt(receipt); err != nil {
+		fmt.Printf("Error inserting receipt into database: %v\n", err)
 		writeError(w, http.StatusInternalServerError, "Failed to record receipt in database")
 		return
 	}
@@ -138,7 +139,7 @@ func handleUploadReceipt(w http.ResponseWriter, r *http.Request) {
 		ocrResult, rawText, err := ProcessReceiptImage(rcpt.ImageURL)
 		if err != nil {
 			fmt.Printf("Error processing receipt %s: %v\n", rcpt.ID, err)
-			_ = UpdateReceiptStatus(rcpt.ID, "error", err.Error())
+			_ = UpdateReceiptStatus(rcpt.ID, "failed", err.Error())
 
 			GlobalHub.SendToUser(rcpt.UserID, SocketEvent{
 				Type: "RECEIPT_PROCESSED",
@@ -150,12 +151,10 @@ func handleUploadReceipt(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		status := "done"
-		if ocrResult.NeedsReview {
-			status = "needs_review"
-		}
+		dbStatus := "completed"
+		wsStatus := "done"
 
-		if err := UpdateReceiptStatus(rcpt.ID, status, rawText); err != nil {
+		if err := UpdateReceiptStatus(rcpt.ID, dbStatus, rawText); err != nil {
 			fmt.Printf("Database error updating receipt status: %v\n", err)
 			return
 		}
@@ -176,13 +175,35 @@ func handleUploadReceipt(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// Ensure there's a budget for this category covering at least this amount
+		currentMonth := transaction.Date
+		if len(currentMonth) > 7 {
+			currentMonth = currentMonth[:7] + "-01" // e.g., "2026-06-14" -> "2026-06-01"
+		} else if len(currentMonth) == 7 {
+			currentMonth = currentMonth + "-01"
+		}
+		
+		// Insert budget with limit = amount if it doesn't exist, ON CONFLICT DO NOTHING (or we could update if it's smaller, but the user requested "at least")
+		// We'll create it directly in DB
+		if transaction.Category != "" && transaction.Category != "otros" {
+			_, err := DB.Exec(`
+				INSERT INTO budgets (id, user_id, category, limit_amount, month)
+				VALUES ($1, $2, $3, $4, $5)
+				ON CONFLICT (user_id, category, month) 
+				DO UPDATE SET limit_amount = GREATEST(budgets.limit_amount, EXCLUDED.limit_amount)
+			`, NewUUID(), transaction.UserID, transaction.Category, transaction.Amount, currentMonth)
+			if err != nil {
+				fmt.Printf("Database error creating automatic budget: %v\n", err)
+			}
+		}
+
 		fmt.Printf("Receipt %s processed: Transaction %s (%s, %.2f)\n", rcpt.ID, txnID, transaction.Merchant, transaction.Amount)
 
 		GlobalHub.SendToUser(rcpt.UserID, SocketEvent{
 			Type: "RECEIPT_PROCESSED",
 			Payload: ReceiptProcessedPayload{
 				ReceiptID: rcpt.ID,
-				Status:    status,
+				Status:    wsStatus,
 				Updates: map[string]interface{}{
 					"id":           transaction.ID,
 					"receiptId":    transaction.ReceiptID,
@@ -283,7 +304,7 @@ func handleUpdateTransaction(w http.ResponseWriter, r *http.Request) {
 			if err == nil && rawText != "" {
 				SendFeedbackToML(rawText, req.Category)
 				// Marcamos el ticket como 'done' para limpiar el posible estado 'needs_review'
-				UpdateReceiptStatus(*existingTxn.ReceiptID, "done", rawText)
+				UpdateReceiptStatus(*existingTxn.ReceiptID, "processed", rawText)
 			}
 		}
 	}
@@ -319,6 +340,8 @@ func handleCreateBudget(w http.ResponseWriter, r *http.Request) {
 
 	if req.Month == "" {
 		req.Month = time.Now().Format("2006-01-02")
+	} else if len(req.Month) == 7 {
+		req.Month = req.Month + "-01"
 	}
 
 	budget := Budget{
